@@ -35,6 +35,22 @@ class SettingsStore(context: Context) {
         return true
     }
 
+    /** 重命名分类；新名空或与其他分类重名返回 false */
+    fun renameCustomCategory(old: String, new: String): Boolean {
+        val n = new.trim()
+        if (n.isEmpty()) return false
+        val cur = sp.getStringSet(KEY_CUSTOM_CATS, emptySet()) ?: emptySet()
+        if (!cur.contains(old)) return false
+        if (cur.any { it.equals(n, ignoreCase = true) && it != old }) return false
+        sp.edit().putStringSet(KEY_CUSTOM_CATS, (cur - old) + n).apply()
+        return true
+    }
+
+    fun removeCustomCategory(label: String) {
+        val cur = sp.getStringSet(KEY_CUSTOM_CATS, emptySet()) ?: emptySet()
+        sp.edit().putStringSet(KEY_CUSTOM_CATS, cur - label).apply()
+    }
+
     companion object {
         const val DEFAULT_URL = "https://api.deepseek.com"
         const val DEFAULT_MODEL = "deepseek-chat"

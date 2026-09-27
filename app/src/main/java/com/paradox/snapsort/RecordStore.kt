@@ -28,7 +28,12 @@ class RecordStore(context: Context) {
         val note: String?,
     )
 
-    fun save(photoBytes: ByteArray, categoryId: String, labels: List<String>, ocrText: String): Record {
+    fun save(
+        photoBytes: ByteArray,
+        categoryId: String = Categories.UNCATEGORIZED.id,
+        labels: List<String>,
+        ocrText: String,
+    ): Record {
         val id = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) +
             "_" + (1000..9999).random()
         val dir = File(root, id).apply { mkdirs() }
@@ -61,6 +66,11 @@ class RecordStore(context: Context) {
     fun photoFile(id: String): File = File(root, "$id/photo.jpg")
 
     fun move(id: String, newCategoryId: String) = mutate(id) { it.put("category", newCategoryId) }
+
+    /** 把某分类下的全部记录迁移到另一分类（重命名 / 删除分类时用） */
+    fun retargetCategory(fromId: String, toId: String) {
+        list(fromId).forEach { move(it.id, toId) }
+    }
 
     fun saveNote(id: String, note: String) = mutate(id) { it.put("note", note) }
 

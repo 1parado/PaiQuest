@@ -21,6 +21,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -68,6 +69,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -109,11 +111,22 @@ fun SnapSortApp() {
 
     // 用户自建分类（内置分类之外可无限扩展）
     var customCats by remember { mutableStateOf(settings.customCategoryLabels()) }
-    val allCats = Categories.all + customCats.map { Categories.custom(it) }
-    fun catById(id: String): Category = allCats.firstOrNull { it.id == id } ?: Categories.OTHER
+    val allCats = listOf(Categories.UNCATEGORIZED) + Categories.builtin + customCats.map { Categories.custom(it) }
 
     val addCategory: (String) -> Unit = { label ->
         if (settings.addCustomCategory(label)) customCats = settings.customCategoryLabels()
+    }
+    val renameCategory: (String, String) -> Unit = { old, new ->
+        if (settings.renameCustomCategory(old, new)) {
+            store.retargetCategory(Categories.CUSTOM_PREFIX + old, Categories.CUSTOM_PREFIX + new)
+            customCats = settings.customCategoryLabels()
+        }
+    }
+    val deleteCategory: (String) -> Unit = { label ->
+        settings.removeCustomCategory(label)
+        // 分类删除后，其下记录回到「未分类」，图片本体不受影响
+        store.retargetCategory(Categories.CUSTOM_PREFIX + label, Categories.UNCATEGORIZED.id)
+        customCats = settings.customCategoryLabels()
     }
 
     MaterialTheme {
@@ -128,6 +141,8 @@ fun SnapSortApp() {
                 store = store,
                 allCats = allCats,
                 onAddCategory = addCategory,
+                onRenameCategory = renameCategory,
+                onDeleteCategory = deleteCategory,
                 onOpen = { screen = Screen.Detail(it) },
                 onBack = { screen = Screen.Capture },
             )
@@ -182,11 +197,11 @@ fun CaptureScreen(
     DisposableEffect(Unit) { onDispose { executor.shutdown() } }
 
     suspend fun process(source: File) = withContext(Dispatchers.IO) {
-        status = "识别中：图像分析 + OCR…"
+        status = "识别中：提取文字与标签…"
         try {
             val result = Classifier.classify(ctx, source)
-            // 识别完成即自动归档到对应分类
-            val record = store.save(source.readBytes(), result.categoryId, result.labels, result.ocrText)
+            // 默认不分类：只提取标签与文字（供搜索/AI 讲解），归类由用户在详情页完成
+            val record = store.save(source.readBytes(), labels = result.labels, ocrText = result.ocrText)
             status = null
             withContext(Dispatchers.Main) { onSaved(record.id) }
         } catch (e: Exception) {
@@ -339,16 +354,21 @@ fun LibraryScreen(
     store: RecordStore,
     allCats: List<Category>,
     onAddCategory: (String) -> Unit,
+    onRenameCategory: (String, String) -> Unit,
+    onDeleteCategory: (String) -> Unit,
     onOpen: (String) -> Unit,
     onBack: () -> Unit,
 ) {
     var filter by remember { mutableStateOf<String?>(null) }
     var query by remember { mutableStateOf("") }
     var showAddDialog by remember { mutableStateOf(false) }
+    var showManage by remember { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<RecordStore.Record?>(null) }
     var refreshKey by remember { mutableStateOf(0) }
 
-    val records = remember(filter, refreshKey) { store.list(filter) }
+    // 被删掉的分类 id 自愈为「全部」，避免筛选悬空
+    val effFilter = if (filter != null && allCats.any { it.id == filter }) filter else null
+    val records = remember(effFilter, refreshKey, allCats) { store.list(effFilter) }
     val counts = remember(records) { records.groupingBy { it.categoryId }.eachCount() }
 
     // 搜索：匹配 OCR 文字 / 识别标签 / 笔记 / 分类名
@@ -380,7 +400,7 @@ fun LibraryScreen(
             val filters: List<String?> = listOf(null) + allCats.map { it.id }
             items(filters) { f ->
                 FilterChip(
-                    selected = filter == f,
+                    selected = effFilter == f,
                     onClick = { filter = f },
                     label = {
                         Text(
@@ -395,6 +415,13 @@ fun LibraryScreen(
                     selected = false,
                     onClick = { showAddDialog = true },
                     label = { Text("＋ 新分类") },
+                )
+            }
+            item {
+                FilterChip(
+                    selected = false,
+                    onClick = { showManage = true },
+                    label = { Text("管理") },
                 )
             }
         }
@@ -414,7 +441,7 @@ fun LibraryScreen(
                 gridItems(shown, key = { it.id }) { r ->
                     RecordThumb(
                         path = store.photoFile(r.id).absolutePath,
-                        categoryLabel = (allCats.firstOrNull { it.id == r.categoryId } ?: Categories.OTHER).label,
+                        categoryLabel = (allCats.firstOrNull { it.id == r.categoryId } ?: Categories.UNCATEGORIZED).label,
                         timeLabel = formatTime(r.createdAt, "MM-dd HH:mm"),
                         onClick = { onOpen(r.id) },
                         onLongClick = { deleteTarget = r },
@@ -439,6 +466,22 @@ fun LibraryScreen(
                 refreshKey++
             },
             onDismiss = { deleteTarget = null },
+        )
+    }
+
+    if (showManage) {
+        CategoryManageDialog(
+            customLabels = allCats.filter { Categories.isCustom(it.id) }.map { it.label },
+            countOf = { label -> counts[Categories.CUSTOM_PREFIX + label] ?: 0 },
+            onRename = { old, new ->
+                onRenameCategory(old, new)
+                refreshKey++
+            },
+            onDelete = { label ->
+                onDeleteCategory(label)
+                refreshKey++
+            },
+            onDismiss = { showManage = false },
         )
     }
 }
@@ -534,7 +577,7 @@ fun DetailScreen(
             Spacer(Modifier.weight(1f))
             Box {
                 TextButton(onClick = { menuOpen = true }) {
-                    Text("分类：${(allCats.firstOrNull { it.id == r.categoryId } ?: Categories.OTHER).label} ▾")
+                    Text("分类：${(allCats.firstOrNull { it.id == r.categoryId } ?: Categories.UNCATEGORIZED).label} ▾")
                 }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                     allCats.forEach { c ->
@@ -584,6 +627,12 @@ fun DetailScreen(
                         onClick = { next?.let { onNavigate(it.id) } },
                     ) { Text("下一张 →") }
                 }
+                Text(
+                    "左右滑动图片也可切换",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 4.dp),
+                )
             }
             bitmap?.let {
                 Image(
@@ -592,7 +641,20 @@ fun DetailScreen(
                     contentScale = ContentScale.Fit,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp)),
+                        .clip(RoundedCornerShape(12.dp))
+                        .pointerInput(r.id, siblings.size) {
+                            var dragX = 0f
+                            detectHorizontalDragGestures(
+                                onDragStart = { dragX = 0f },
+                                onDragEnd = {
+                                    when {
+                                        dragX <= -100f && next != null -> onNavigate(next.id)
+                                        dragX >= 100f && prev != null -> onNavigate(prev.id)
+                                    }
+                                    dragX = 0f
+                                },
+                            ) { _, amount -> dragX += amount }
+                        },
                 )
             }
             Spacer(Modifier.height(8.dp))
@@ -649,7 +711,7 @@ fun DetailScreen(
                             aiLoading = true
                             aiError = null
                             try {
-                                val category = allCats.firstOrNull { it.id == r.categoryId } ?: Categories.OTHER
+                                val category = allCats.firstOrNull { it.id == r.categoryId } ?: Categories.UNCATEGORIZED
                                 val user =
                                     "图像识别标签：${if (r.labels.isEmpty()) "无" else r.labels.joinToString("、")}\n" +
                                         "图中识别文字：${r.ocrText.ifBlank { "无" }}"
@@ -772,10 +834,26 @@ fun SettingsScreen(settings: SettingsStore, onBack: () -> Unit) {
 
 @Composable
 fun NewCategoryDialog(onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
-    var text by remember { mutableStateOf("") }
+    CategoryNameDialog(
+        title = "新建分类",
+        confirmLabel = "创建",
+        onConfirm = onConfirm,
+        onDismiss = onDismiss,
+    )
+}
+
+@Composable
+fun CategoryNameDialog(
+    title: String,
+    initial: String = "",
+    confirmLabel: String = "确定",
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var text by remember { mutableStateOf(initial) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("新建分类") },
+        title = { Text(title) },
         text = {
             OutlinedTextField(
                 value = text,
@@ -791,12 +869,89 @@ fun NewCategoryDialog(onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
                     onConfirm(text)
                     onDismiss()
                 },
-            ) { Text("创建") }
+            ) { Text(confirmLabel) }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("取消") }
         },
     )
+}
+
+@Composable
+fun CategoryManageDialog(
+    customLabels: List<String>,
+    countOf: (String) -> Int,
+    onRename: (String, String) -> Unit,
+    onDelete: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var renaming by remember { mutableStateOf<String?>(null) }
+    var deleting by remember { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("管理分类") },
+        text = {
+            Column {
+                if (customLabels.isEmpty()) {
+                    Text(
+                        "还没有自定义分类，点「＋ 新分类」创建",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                customLabels.forEach { label ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(vertical = 2.dp),
+                    ) {
+                        Text(
+                            "${label}（${countOf(label)} 张）",
+                            fontSize = 14.sp,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = { renaming = label }) { Text("重命名") }
+                        TextButton(onClick = { deleting = label }) { Text("删除") }
+                    }
+                }
+                Text(
+                    "删除分类后，其中的图片会移入「未分类」。",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("完成") }
+        },
+    )
+
+    renaming?.let { old ->
+        CategoryNameDialog(
+            title = "重命名分类",
+            initial = old,
+            confirmLabel = "重命名",
+            onConfirm = { new -> onRename(old, new) },
+            onDismiss = { renaming = null },
+        )
+    }
+
+    deleting?.let { label ->
+        AlertDialog(
+            onDismissRequest = { deleting = null },
+            title = { Text("删除分类「$label」？") },
+            text = { Text("该分类下的 ${countOf(label)} 张图片将移入「未分类」，图片本体不受影响。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    onDelete(label)
+                    deleting = null
+                }) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleting = null }) { Text("取消") }
+            },
+        )
+    }
 }
 
 @Composable

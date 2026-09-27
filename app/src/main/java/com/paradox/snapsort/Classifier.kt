@@ -12,13 +12,9 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 
 /**
- * 离线分类引擎：图像标签（粗分类）+ 中文 OCR（辅助判断），全部端侧完成，零网络请求。
- *
- * 分类规则（高信息密度、可解释）：
- * 1. 文字占比高（OCR 字数多）→ 错题本：拍题是最高频的「拍文字」场景；
- * 2. 标签命中植物类 → 植物；
- * 3. 标签命中动物类 → 动物；
- * 4. 其余 → 其他。
+ * 端侧识别引擎：图像标签 + 中文 OCR，全部端侧完成，零网络请求。
+ * 只负责「提取信息」（供搜索与 AI 讲解使用），不做自动归类——
+ * 新记录默认「未分类」，归类权完全交给用户。
  */
 object Classifier {
 
@@ -26,7 +22,6 @@ object Classifier {
     private val ocr by lazy { TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build()) }
 
     data class Result(
-        val categoryId: String,
         val labels: List<String>,
         val ocrText: String,
     )
@@ -49,21 +44,6 @@ object Classifier {
             ""
         }
 
-        return Result(decide(labels, text), labels, text)
-    }
-
-    private fun decide(labels: List<String>, ocrText: String): String {
-        fun has(vararg keys: String) = labels.any { l -> keys.any { l.contains(it, ignoreCase = true) } }
-
-        val textHeavy = ocrText.length >= 30
-        return when {
-            textHeavy && (has("Text", "Document", "Book", "Paper", "Handwriting") || ocrText.length >= 120) ->
-                Categories.MISTAKE.id
-            has("Plant", "Flower", "Tree", "Leaf", "Grass", "Garden", "Fruit") ->
-                Categories.PLANT.id
-            has("Animal", "Cat", "Dog", "Bird", "Fish", "Insect", "Pet", "Butterfly", "Horse", "Reptile") ->
-                Categories.ANIMAL.id
-            else -> Categories.OTHER.id
-        }
+        return Result(labels, text)
     }
 }

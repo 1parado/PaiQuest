@@ -1,7 +1,8 @@
 package com.paradox.snapsort
 
 /**
- * 分类 = 归档目录 + AI 讲解提示词。新增分类只在这里加一条 Category。
+ * 分类 = 归档目录 + AI 讲解提示词。
+ * 新记录默认进入「未分类」，由用户手动归类；自定义分类可在图库中增删改。
  */
 data class Category(
     val id: String,
@@ -14,6 +15,19 @@ object Categories {
     private const val OUTPUT_CONTRACT =
         "输出严格遵守既定小节标题格式，不要开场白、不要客套、不要重复原文、不要使用表情。" +
             "信息密度优先，能一句话说清的不用两句。用简体中文。"
+
+    private const val GENERIC_PROMPT =
+        "你是现场讲解助手，输入是一张照片的图像识别标签和其中识别出的文字。输出格式：\n" +
+            "【结论】一句话给出最核心的判断\n" +
+            "【要点】不超过5条，每条一行，只保留高价值信息\n" +
+            "【延伸】一行，给出最值得知道的一个关联点\n"
+
+    /** 默认归宿：拍照/上传后未归类的记录 */
+    val UNCATEGORIZED = Category(
+        id = "uncategorized",
+        label = "未分类",
+        aiPrompt = GENERIC_PROMPT + OUTPUT_CONTRACT,
+    )
 
     val MISTAKE = Category(
         id = "mistake",
@@ -46,27 +60,20 @@ object Categories {
     val OTHER = Category(
         id = "other",
         label = "其他",
-        aiPrompt = "你是现场讲解助手，输入是一张照片的图像识别标签和其中识别出的文字。输出格式：\n" +
-            "【结论】一句话给出最核心的判断\n" +
-            "【要点】不超过5条，每条一行，只保留高价值信息\n" +
-            "【延伸】一行，给出最值得知道的一个关联点\n" + OUTPUT_CONTRACT,
+        aiPrompt = GENERIC_PROMPT + OUTPUT_CONTRACT,
     )
 
-    val all = listOf(MISTAKE, PLANT, ANIMAL, OTHER)
+    /** 内置业务分类（不含未分类） */
+    val builtin = listOf(MISTAKE, PLANT, ANIMAL, OTHER)
 
-    /** 自动分类只落在这 4 个内置分类上；自定义分类由用户手动归入。 */
-    val autoTargets = all
-
-    fun byId(id: String): Category = all.firstOrNull { it.id == id } ?: OTHER
+    fun byId(id: String): Category =
+        (listOf(UNCATEGORIZED) + builtin).firstOrNull { it.id == id } ?: UNCATEGORIZED
 
     /** 用户自建分类：id 带前缀避免与内置冲突，AI 提示词用通用讲解模板。 */
     fun custom(label: String) = Category(
         id = CUSTOM_PREFIX + label,
         label = label,
-        aiPrompt = "你是现场讲解助手，输入是一张照片的图像识别标签和其中识别出的文字。输出格式：\n" +
-            "【结论】一句话给出最核心的判断\n" +
-            "【要点】不超过5条，每条一行，只保留高价值信息\n" +
-            "【延伸】一行，给出最值得知道的一个关联点\n" + OUTPUT_CONTRACT,
+        aiPrompt = GENERIC_PROMPT + OUTPUT_CONTRACT,
     )
 
     const val CUSTOM_PREFIX = "custom:"
