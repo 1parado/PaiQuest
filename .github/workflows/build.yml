@@ -3,8 +3,12 @@ name: Android Build
 on:
   push:
     branches: [main, master]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -46,3 +50,14 @@ jobs:
             app/build/outputs/apk/debug/app-debug.apk
             app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
+
+      - name: Create GitHub Release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "拾集 ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            app/build/outputs/apk/release/app-release.apk#PaiQuest-${GITHUB_REF_NAME}-release.apk \
+            app/build/outputs/apk/debug/app-debug.apk#PaiQuest-${GITHUB_REF_NAME}-debug.apk
