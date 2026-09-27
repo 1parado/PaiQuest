@@ -16,11 +16,29 @@ android {
         versionName = "2.0.0"
     }
 
+    // 签名配置：CI 环境通过环境变量注入（密钥存 GitHub Secrets），本地/无签名环境产出 unsigned 包
+    signingConfigs {
+        create("release") {
+            val env = System.getenv()
+            if (env["KEYSTORE_FILE"] != null) {
+                storeFile = file(env["KEYSTORE_FILE"]!!)
+                storePassword = env["KEYSTORE_PASSWORD"]
+                keyAlias = env["KEY_ALIAS"]
+                keyPassword = env["KEY_PASSWORD"]
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = if (System.getenv("KEYSTORE_FILE") != null) {
+                signingConfigs.getByName("release")
+            } else {
+                null
+            }
         }
     }
 
