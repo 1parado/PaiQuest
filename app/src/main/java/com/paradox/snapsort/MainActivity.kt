@@ -42,6 +42,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -78,6 +79,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.Executors
 
 class MainActivity : ComponentActivity() {
@@ -101,6 +105,15 @@ fun SnapSortApp() {
     val settings = remember { SettingsStore(ctx) }
     var screen by remember { mutableStateOf<Screen>(Screen.Capture) }
 
+    // 用户自建分类（内置分类之外可无限扩展）
+    var customCats by remember { mutableStateOf(settings.customCategoryLabels()) }
+    val allCats = Categories.all + customCats.map { Categories.custom(it) }
+    fun catById(id: String): Category = allCats.firstOrNull { it.id == id } ?: Categories.OTHER
+
+    val addCategory: (String) -> Unit = { label ->
+        if (settings.addCustomCategory(label)) customCats = settings.customCategoryLabels()
+    }
+
     MaterialTheme {
         when (val s = screen) {
             Screen.Capture -> CaptureScreen(
@@ -111,6 +124,8 @@ fun SnapSortApp() {
             )
             Screen.Library -> LibraryScreen(
                 store = store,
+                allCats = allCats,
+                onAddCategory = addCategory,
                 onOpen = { screen = Screen.Detail(it) },
                 onBack = { screen = Screen.Capture },
             )
@@ -118,6 +133,8 @@ fun SnapSortApp() {
                 store = store,
                 settings = settings,
                 recordId = s.recordId,
+                allCats = allCats,
+                onAddCategory = addCategory,
                 onBack = { screen = Screen.Library },
             )
             Screen.Settings -> SettingsScreen(
@@ -165,6 +182,7 @@ fun CaptureScreen(
         status = "识别中：图像分析 + OCR…"
         try {
             val result = Classifier.classify(ctx, source)
+            // 识别完成即自动归档到对应分类
             val record = store.save(source.readBytes(), result.categoryId, result.labels, result.ocrText)
             status = null
             withContext(Dispatchers.Main) { onSaved(record.id) }
@@ -314,10 +332,28 @@ fun CaptureScreen(
 // ---------------------------------------------------------------- 图库页
 
 @Composable
-fun LibraryScreen(store: RecordStore, onOpen: (String) -> Unit, onBack: () -> Unit) {
+fun LibraryScreen(
+    store: RecordStore,
+    allCats: List<Category>,
+    onAddCategory: (String) -> Unit,
+    onOpen: (String) -> Unit,
+    onBack: () -> Unit,
+) {
     var filter by remember { mutableStateOf<String?>(null) }
+    var query by remember { mutableStateOf("") }
+    var showAddDialog by remember { mutableStateOf(false) }
+
     val records = remember(filter) { store.list(filter) }
     val counts = remember(records) { records.groupingBy { it.categoryId }.eachCount() }
+
+    // 搜索：匹配 OCR 文字 / 识别标签 / 笔记 / 分类名
+    val q = query.trim()
+    val shown = if (q.isEmpty()) records else records.filter { r ->
+        r.ocrText.contains(q, ignoreCase = true) ||
+            r.labels.any { it.contains(q, ignoreCase = true) } ||
+            (r.note?.contains(q, ignoreCase = true) == true) ||
+            (allCats.firstOrNull { it.id == r.categoryId }?.label?.contains(q, ignoreCase = true) == true)
+    }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -326,27 +362,43 @@ fun LibraryScreen(store: RecordStore, onOpen: (String) -> Unit, onBack: () -> Un
             TextButton(onClick = onBack) { Text("返回拍摄") }
         }
 
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            label = { Text("搜索：文字内容 / 标签 / 分类") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+        )
+        Spacer(Modifier.height(8.dp))
+
         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            val filters: List<String?> = listOf(null) + Categories.all.map { it.id }
+            val filters: List<String?> = listOf(null) + allCats.map { it.id }
             items(filters) { f ->
                 FilterChip(
                     selected = filter == f,
                     onClick = { filter = f },
                     label = {
                         Text(
-                            (if (f == null) "全部" else Categories.byId(f).label) +
+                            (if (f == null) "全部" else allCats.first { it.id == f }.label) +
                                 " " + (if (f == null) records.size else counts[f] ?: 0),
                         )
                     },
                 )
             }
+            item {
+                FilterChip(
+                    selected = false,
+                    onClick = { showAddDialog = true },
+                    label = { Text("＋ 新分类") },
+                )
+            }
         }
 
-        if (records.isEmpty()) {
+        if (shown.isEmpty()) {
             Box(
                 Modifier.weight(1f).fillMaxWidth(),
                 contentAlignment = Alignment.Center,
-            ) { Text("还没有收藏，去拍一张吧") }
+            ) { Text(if (q.isEmpty()) "还没有收藏，去拍一张吧" else "没有匹配「$q」的结果") }
         } else {
             LazyVerticalGrid(
                 columns = GridCells.Adaptive(96.dp),
@@ -354,20 +406,28 @@ fun LibraryScreen(store: RecordStore, onOpen: (String) -> Unit, onBack: () -> Un
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                gridItems(records, key = { it.id }) { r ->
+                gridItems(shown, key = { it.id }) { r ->
                     RecordThumb(
                         path = store.photoFile(r.id).absolutePath,
-                        categoryLabel = Categories.byId(r.categoryId).label,
+                        categoryLabel = (allCats.firstOrNull { it.id == r.categoryId } ?: Categories.OTHER).label,
+                        timeLabel = formatTime(r.createdAt, "MM-dd HH:mm"),
                         onClick = { onOpen(r.id) },
                     )
                 }
             }
         }
     }
+
+    if (showAddDialog) {
+        NewCategoryDialog(
+            onConfirm = onAddCategory,
+            onDismiss = { showAddDialog = false },
+        )
+    }
 }
 
 @Composable
-fun RecordThumb(path: String, categoryLabel: String, onClick: () -> Unit) {
+fun RecordThumb(path: String, categoryLabel: String, timeLabel: String, onClick: () -> Unit) {
     val bitmap by produceState<Bitmap?>(null, path) {
         value = withContext(Dispatchers.IO) { decodeSampled(path, 256) }
     }
@@ -396,6 +456,16 @@ fun RecordThumb(path: String, categoryLabel: String, onClick: () -> Unit) {
                 .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
                 .padding(horizontal = 4.dp, vertical = 1.dp),
         )
+        Text(
+            timeLabel,
+            fontSize = 10.sp,
+            color = Color.White,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(4.dp)
+                .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
+                .padding(horizontal = 4.dp, vertical = 1.dp),
+        )
     }
 }
 
@@ -407,6 +477,8 @@ fun DetailScreen(
     store: RecordStore,
     settings: SettingsStore,
     recordId: String,
+    allCats: List<Category>,
+    onAddCategory: (String) -> Unit,
     onBack: () -> Unit,
 ) {
     var record by remember(recordId) { mutableStateOf(store.get(recordId)) }
@@ -415,6 +487,7 @@ fun DetailScreen(
     var aiError by remember { mutableStateOf<String?>(null) }
     var menuOpen by remember { mutableStateOf(false) }
     var showSource by remember { mutableStateOf(false) }
+    var showAddDialog by remember { mutableStateOf(false) }
 
     val r = record
     if (r == null) {
@@ -435,10 +508,10 @@ fun DetailScreen(
             Spacer(Modifier.weight(1f))
             Box {
                 TextButton(onClick = { menuOpen = true }) {
-                    Text("分类：${Categories.byId(r.categoryId).label} ▾")
+                    Text("分类：${(allCats.firstOrNull { it.id == r.categoryId } ?: Categories.OTHER).label} ▾")
                 }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    Categories.all.forEach { c ->
+                    allCats.forEach { c ->
                         DropdownMenuItem(
                             text = { Text(c.label) },
                             onClick = {
@@ -448,6 +521,13 @@ fun DetailScreen(
                             },
                         )
                     }
+                    DropdownMenuItem(
+                        text = { Text("＋ 新建分类") },
+                        onClick = {
+                            menuOpen = false
+                            showAddDialog = true
+                        },
+                    )
                 }
             }
         }
@@ -467,6 +547,14 @@ fun DetailScreen(
                         .clip(RoundedCornerShape(12.dp)),
                 )
             }
+            Spacer(Modifier.height(8.dp))
+
+            // 拍摄 / 上传时间
+            Text(
+                "拍摄/上传时间：" + formatTime(r.createdAt, "yyyy-MM-dd HH:mm"),
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Spacer(Modifier.height(12.dp))
 
             if (r.labels.isNotEmpty()) {
@@ -513,7 +601,7 @@ fun DetailScreen(
                             aiLoading = true
                             aiError = null
                             try {
-                                val category = Categories.byId(r.categoryId)
+                                val category = allCats.firstOrNull { it.id == r.categoryId } ?: Categories.OTHER
                                 val user =
                                     "图像识别标签：${if (r.labels.isEmpty()) "无" else r.labels.joinToString("、")}\n" +
                                         "图中识别文字：${r.ocrText.ifBlank { "无" }}"
@@ -555,6 +643,13 @@ fun DetailScreen(
             }
             Spacer(Modifier.height(24.dp))
         }
+    }
+
+    if (showAddDialog) {
+        NewCategoryDialog(
+            onConfirm = onAddCategory,
+            onDismiss = { showAddDialog = false },
+        )
     }
 }
 
@@ -608,17 +703,42 @@ fun SettingsScreen(settings: SettingsStore, onBack: () -> Unit) {
             },
             modifier = Modifier.fillMaxWidth(),
         ) { Text("保存") }
-
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "密钥仅保存在本机，不会上传，也不会写入代码仓库。识别与分类全部在手机端离线完成，AI 讲解为可选功能。",
-            fontSize = 12.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
 }
 
-// ---------------------------------------------------------------- 工具
+// ---------------------------------------------------------------- 通用组件与工具
+
+@Composable
+fun NewCategoryDialog(onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
+    var text by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("新建分类") },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                label = { Text("分类名称") },
+                singleLine = true,
+            )
+        },
+        confirmButton = {
+            TextButton(
+                enabled = text.isNotBlank(),
+                onClick = {
+                    onConfirm(text)
+                    onDismiss()
+                },
+            ) { Text("创建") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
+}
+
+private fun formatTime(ms: Long, pattern: String): String =
+    SimpleDateFormat(pattern, Locale.getDefault()).format(Date(ms))
 
 private fun decodeSampled(path: String, req: Int): Bitmap? {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
