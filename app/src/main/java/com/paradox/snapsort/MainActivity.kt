@@ -16,9 +16,11 @@ import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -135,6 +137,7 @@ fun SnapSortApp() {
                 recordId = s.recordId,
                 allCats = allCats,
                 onAddCategory = addCategory,
+                onNavigate = { id -> screen = Screen.Detail(id) },
                 onBack = { screen = Screen.Library },
             )
             Screen.Settings -> SettingsScreen(
@@ -342,8 +345,10 @@ fun LibraryScreen(
     var filter by remember { mutableStateOf<String?>(null) }
     var query by remember { mutableStateOf("") }
     var showAddDialog by remember { mutableStateOf(false) }
+    var deleteTarget by remember { mutableStateOf<RecordStore.Record?>(null) }
+    var refreshKey by remember { mutableStateOf(0) }
 
-    val records = remember(filter) { store.list(filter) }
+    val records = remember(filter, refreshKey) { store.list(filter) }
     val counts = remember(records) { records.groupingBy { it.categoryId }.eachCount() }
 
     // 搜索：匹配 OCR 文字 / 识别标签 / 笔记 / 分类名
@@ -412,6 +417,7 @@ fun LibraryScreen(
                         categoryLabel = (allCats.firstOrNull { it.id == r.categoryId } ?: Categories.OTHER).label,
                         timeLabel = formatTime(r.createdAt, "MM-dd HH:mm"),
                         onClick = { onOpen(r.id) },
+                        onLongClick = { deleteTarget = r },
                     )
                 }
             }
@@ -424,10 +430,22 @@ fun LibraryScreen(
             onDismiss = { showAddDialog = false },
         )
     }
+
+    deleteTarget?.let { target ->
+        ConfirmDeleteDialog(
+            onConfirm = {
+                store.delete(target.id)
+                deleteTarget = null
+                refreshKey++
+            },
+            onDismiss = { deleteTarget = null },
+        )
+    }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun RecordThumb(path: String, categoryLabel: String, timeLabel: String, onClick: () -> Unit) {
+fun RecordThumb(path: String, categoryLabel: String, timeLabel: String, onClick: () -> Unit, onLongClick: () -> Unit) {
     val bitmap by produceState<Bitmap?>(null, path) {
         value = withContext(Dispatchers.IO) { decodeSampled(path, 256) }
     }
@@ -436,7 +454,7 @@ fun RecordThumb(path: String, categoryLabel: String, timeLabel: String, onClick:
             .aspectRatio(1f)
             .clip(RoundedCornerShape(10.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .clickable(onClick = onClick),
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick),
     ) {
         bitmap?.let {
             Image(
@@ -479,6 +497,7 @@ fun DetailScreen(
     recordId: String,
     allCats: List<Category>,
     onAddCategory: (String) -> Unit,
+    onNavigate: (String) -> Unit,
     onBack: () -> Unit,
 ) {
     var record by remember(recordId) { mutableStateOf(store.get(recordId)) }
@@ -488,6 +507,7 @@ fun DetailScreen(
     var menuOpen by remember { mutableStateOf(false) }
     var showSource by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
+    var showDeleteDialog by remember { mutableStateOf(false) }
 
     val r = record
     if (r == null) {
@@ -497,6 +517,12 @@ fun DetailScreen(
         }
         return
     }
+
+    // 同一排序（按时间倒序）下的上一张 / 下一张
+    val siblings = remember(recordId) { store.list() }
+    val idx = siblings.indexOfFirst { it.id == r.id }
+    val prev = siblings.getOrNull(idx - 1)
+    val next = siblings.getOrNull(idx + 1)
 
     val bitmap by produceState<Bitmap?>(null, r.id) {
         value = withContext(Dispatchers.IO) { decodeSampled(store.photoFile(r.id).absolutePath, 1080) }
@@ -530,6 +556,7 @@ fun DetailScreen(
                     )
                 }
             }
+            TextButton(onClick = { showDeleteDialog = true }) { Text("删除") }
         }
 
         Column(
@@ -537,6 +564,27 @@ fun DetailScreen(
                 .weight(1f)
                 .verticalScroll(rememberScrollState()),
         ) {
+            if (siblings.size > 1) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TextButton(
+                        enabled = prev != null,
+                        onClick = { prev?.let { onNavigate(it.id) } },
+                    ) { Text("← 上一张") }
+                    Text(
+                        "${idx + 1} / ${siblings.size}",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    TextButton(
+                        enabled = next != null,
+                        onClick = { next?.let { onNavigate(it.id) } },
+                    ) { Text("下一张 →") }
+                }
+            }
             bitmap?.let {
                 Image(
                     bitmap = it.asImageBitmap(),
@@ -651,6 +699,20 @@ fun DetailScreen(
             onDismiss = { showAddDialog = false },
         )
     }
+
+    if (showDeleteDialog) {
+        ConfirmDeleteDialog(
+            onConfirm = {
+                // 删除前先算好相邻记录：优先跳到下一张，没有则上一张，再没有回图库
+                val i = siblings.indexOfFirst { it.id == r.id }
+                store.delete(r.id)
+                showDeleteDialog = false
+                val nextId = siblings.getOrNull(i + 1)?.id ?: siblings.getOrNull(i - 1)?.id
+                if (nextId != null) onNavigate(nextId) else onBack()
+            },
+            onDismiss = { showDeleteDialog = false },
+        )
+    }
 }
 
 // ---------------------------------------------------------------- 设置页
@@ -730,6 +792,21 @@ fun NewCategoryDialog(onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
                     onDismiss()
                 },
             ) { Text("创建") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
+}
+
+@Composable
+fun ConfirmDeleteDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("删除这张图片？") },
+        text = { Text("将从图库中永久删除（含原图、识别文字与标签），不可恢复。") },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("删除") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("取消") }

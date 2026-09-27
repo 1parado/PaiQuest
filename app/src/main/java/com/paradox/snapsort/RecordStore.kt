@@ -64,6 +64,11 @@ class RecordStore(context: Context) {
 
     fun saveNote(id: String, note: String) = mutate(id) { it.put("note", note) }
 
+    /** 彻底删除一条记录（photo.jpg + meta.json 所在目录整体移除） */
+    fun delete(id: String) {
+        File(root, id).deleteRecursively()
+    }
+
     private fun mutate(id: String, edit: (JSONObject) -> JSONObject) {
         val metaFile = File(root, "$id/meta.json")
         val meta = JSONObject(metaFile.readText())
