@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "SnapAsk"
+rootProject.name = "SnapSort"
 include(":app")

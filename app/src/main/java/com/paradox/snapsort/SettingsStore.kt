@@ -1,4 +1,4 @@
-package com.paradox.snapask
+package com.paradox.snapsort
 
 import android.content.Context
 
@@ -7,7 +7,7 @@ import android.content.Context
  */
 class SettingsStore(context: Context) {
 
-    private val sp = context.getSharedPreferences("snapask_settings", Context.MODE_PRIVATE)
+    private val sp = context.getSharedPreferences("snapsort_settings", Context.MODE_PRIVATE)
 
     var baseUrl: String
         get() = sp.getString(KEY_URL, DEFAULT_URL) ?: DEFAULT_URL

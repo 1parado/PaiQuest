@@ -1,54 +1,76 @@
-# SnapAsk（拍问）
+# SnapSort（拾集）
 
-一个泛化的「拍文字 → AI 讲解」安卓应用：**ML Kit 端侧中文 OCR** 识别取景框里的文字，交给任意 **OpenAI 兼容大模型** 按当前场景输出结构化讲解。考研考公刷题、植物铭牌识读、展板公告理解、外语翻译……场景由提示词驱动，不写死任何领域逻辑。
+一个「拍什么、收什么」的自动归档相册应用：拍照或从相册选图，**端侧自动识别内容并分类归档**——错题进错题本、花草进植物、动物进动物，全程离线、秒级完成。
+
+## 核心闭环
+
+```
+拍照 / 相册选图
+   ↓
+端侧识别：ML Kit 图像标签（内容）+ ML Kit 中文 OCR（文字）   ← 离线，秒级
+   ↓
+自动分类：错题本 / 植物 / 动物 / 其他（可在详情页手动改）
+   ↓
+图库浏览（分类筛选 + 网格缩略图）→ 详情页（原图 / 标签 / 识别文字 / 可选 AI 讲解）
+```
 
 ## 特性
 
-- **泛化强**：场景 = 提示词（见 `Scenes.kt`），新增场景只需加一条 `Scene`，零领域代码。
-- **高信息密度、低噪音**：输出固定为【结论】【要点】【延伸】式小节，禁客套话；界面一屏一事，拍摄 → 讲解两步完成。
-- **端侧 OCR**：ML Kit 中文识别模型随 APK 打包，离线可用，不依赖 Google Play 服务。
-- **体积小**：单 Activity + Compose，网络用 `HttpURLConnection`、JSON 用系统 `org.json`，刻意不引入 OkHttp / Retrofit / Coil / 导航库；release 开启 R8 + 资源收缩。
-- **隐私**：OCR 全程端侧；API Key 只存本机 SharedPreferences；除你主动发起讲解外无任何网络请求。
+- **泛化强**：分类 = 配置（`Categories.kt`），归类关键词 + AI 提示词一条搞定，新分类零领域代码。
+- **离线优先**：识别与分类全部在手机端完成，无网可用；AI 讲解是详情页的可选功能（OpenAI 兼容接口，默认 DeepSeek）。
+- **高信息密度、低噪音**：AI 输出固定为【结论】【要点】【延伸】式小节；界面一屏一事。
+- **体积小、内存省**：网络用 `HttpURLConnection`、JSON 用系统 `org.json`、存储用「文件夹 + meta.json」、图片用采样解码；刻意不引入 OkHttp / Retrofit / Coil / Glide / Room / 导航库；release 开 R8。
+- **隐私**：识别分类端侧完成；相册导入走系统 Photo Picker（不需要存储权限）；API Key 只存本机。
 
 ## 构建（仅限 GitHub CI）
 
 遵循 `AGENT.md` 的 P0 规则：**禁止本地编译**。
 
 1. 推送到 GitHub（`main` 分支）或手动触发 `workflow_dispatch`；
-2. 进入仓库 **Actions → Android Build → 最新一次运行 → Artifacts**，下载 `SnapAsk-apk`；
+2. 进入仓库 **Actions → Android Build → 最新一次运行 → Artifacts**，下载 `SnapSort-apk`；
 3. `app-debug.apk` 可直接安装；`app-release-unsigned.apk` 需签名后安装。
 
 ## 使用
 
-1. 安装后进入「设置」，填入 OpenAI 兼容的 API 地址、Key 与模型名（默认指向 DeepSeek）；
-2. 取景 → 选场景（通用讲解 / 题目精讲 / 植物铭牌 / 翻译）→ 按快门；
-3. 结果页可直接继续追问，上下文自动保留。
+1. 拍照或点「相册」选图 → 自动识别并归档 → 直接进入详情页；
+2. 详情页可改分类、看识别文字、点「AI 讲解」生成结构化讲解（需在设置页配置 API）；
+3. 「图库」按分类浏览全部收藏。
+
+## 分类规则（`Classifier.kt`，可解释的规则引擎）
+
+| 信号 | 判定 |
+|---|---|
+| OCR 文字 ≥30 字且标签含 Text/Document/Book 等，或文字 ≥120 字 | 错题本 |
+| 标签命中 Plant/Flower/Tree/Leaf… | 植物 |
+| 标签命中 Animal/Cat/Dog/Bird/Insect… | 动物 |
+| 其余 | 其他 |
 
 ## 目录结构
 
 ```
-SnapAsk/
+SnapSort/
 ├── AGENT.md                  # Agent 协作规则（P0：编译只在 CI）
-├── .github/workflows/build.yml  # CI 构建（debug + unsigned release）
-├── app/src/main/java/com/paradox/snapask/
-│   ├── MainActivity.kt       # 全部 UI：相机页 / 结果页 / 设置页
-│   ├── Scenes.kt             # 场景 = 提示词（泛化核心）
-│   ├── SettingsStore.kt      # 本地设置存储
-│   ├── ocr/OcrAnalyzer.kt    # ML Kit 端侧 OCR（按需触发）
+├── .github/workflows/build.yml
+├── app/src/main/java/com/paradox/snapsort/
+│   ├── MainActivity.kt       # 全部 UI：拍摄 / 图库 / 详情 / 设置
+│   ├── Categories.kt         # 分类 = 关键词 + AI 提示词（泛化核心）
+│   ├── Classifier.kt         # 端侧分类引擎（图像标签 + OCR + 规则）
+│   ├── RecordStore.kt        # 零依赖本地存储（photo.jpg + meta.json）
+│   ├── SettingsStore.kt      # 本地设置
 │   └── net/LlmClient.kt      # OpenAI 兼容客户端（零依赖实现）
 └── app/build.gradle.kts      # 依赖最小化清单
 ```
 
-## 扩展一个新场景
+## 新增一个分类
 
-只改 `Scenes.kt`，例如新增「药品说明书」：
+只改 `Categories.kt`，例如新增「美食」：
 
 ```kotlin
-Scene(
-    id = "medicine",
-    label = "药品说明",
-    systemPrompt = "你是用药助手……输出格式：【结论】【要点】【注意】……",
+val FOOD = Category(
+    id = "food", label = "美食",
+    aiPrompt = "你是美食助手……输出格式：【结论】【要点】【注意】……",
 )
+// 并在 Classifier.decide() 加一行：has("Food", "Dish", "Dessert") -> FOOD.id
 ```
 
-无需改动任何 UI 或业务代码——新场景自动出现在相机页顶部的场景栏。
+UI、存储、图库筛选自动适配，无需改动其他代码。
