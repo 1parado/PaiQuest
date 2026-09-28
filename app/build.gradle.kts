@@ -12,8 +12,8 @@ android {
         applicationId = "com.paradox.snapsort"
         minSdk = 24
         targetSdk = 35
-        versionCode = 5
-        versionName = "2.3.0"
+        versionCode = 6
+        versionName = "2.4.0"
     }
 
     // 签名配置：CI 环境通过环境变量注入（密钥存 GitHub Secrets），本地/无签名环境产出 unsigned 包

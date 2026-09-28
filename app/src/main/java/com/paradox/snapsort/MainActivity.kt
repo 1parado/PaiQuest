@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -19,9 +20,9 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -36,11 +37,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -64,12 +68,12 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -99,6 +103,8 @@ sealed interface Screen {
     data object Capture : Screen
     data object Library : Screen
     data class Detail(val recordId: String) : Screen
+    data object CategoryManage : Screen
+    data object Trash : Screen
     data object Settings : Screen
 }
 
@@ -141,8 +147,8 @@ fun SnapSortApp() {
                 store = store,
                 allCats = allCats,
                 onAddCategory = addCategory,
-                onRenameCategory = renameCategory,
-                onDeleteCategory = deleteCategory,
+                onOpenManage = { screen = Screen.CategoryManage },
+                onOpenTrash = { screen = Screen.Trash },
                 onOpen = { screen = Screen.Detail(it) },
                 onBack = { screen = Screen.Capture },
             )
@@ -153,6 +159,18 @@ fun SnapSortApp() {
                 allCats = allCats,
                 onAddCategory = addCategory,
                 onNavigate = { id -> screen = Screen.Detail(id) },
+                onBack = { screen = Screen.Library },
+            )
+            Screen.CategoryManage -> CategoryManageScreen(
+                store = store,
+                allCats = allCats,
+                onAddCategory = addCategory,
+                onRenameCategory = renameCategory,
+                onDeleteCategory = deleteCategory,
+                onBack = { screen = Screen.Library },
+            )
+            Screen.Trash -> TrashScreen(
+                store = store,
                 onBack = { screen = Screen.Library },
             )
             Screen.Settings -> SettingsScreen(
@@ -354,17 +372,21 @@ fun LibraryScreen(
     store: RecordStore,
     allCats: List<Category>,
     onAddCategory: (String) -> Unit,
-    onRenameCategory: (String, String) -> Unit,
-    onDeleteCategory: (String) -> Unit,
+    onOpenManage: () -> Unit,
+    onOpenTrash: () -> Unit,
     onOpen: (String) -> Unit,
     onBack: () -> Unit,
 ) {
     var filter by remember { mutableStateOf<String?>(null) }
     var query by remember { mutableStateOf("") }
     var showAddDialog by remember { mutableStateOf(false) }
-    var showManage by remember { mutableStateOf(false) }
-    var deleteTarget by remember { mutableStateOf<RecordStore.Record?>(null) }
     var refreshKey by remember { mutableStateOf(0) }
+
+    // 批量选择模式
+    var selecting by remember { mutableStateOf(false) }
+    var selected by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var showBatchMove by remember { mutableStateOf(false) }
+    var showBatchDelete by remember { mutableStateOf(false) }
 
     // 被删掉的分类 id 自愈为「全部」，避免筛选悬空
     val effFilter = if (filter != null && allCats.any { it.id == filter }) filter else null
@@ -380,49 +402,63 @@ fun LibraryScreen(
             (allCats.firstOrNull { it.id == r.categoryId }?.label?.contains(q, ignoreCase = true) == true)
     }
 
+    fun exitSelection() {
+        selecting = false
+        selected = emptySet()
+    }
+
     Column(Modifier.fillMaxSize().padding(16.dp)) {
+        // 顶栏：浏览态 / 选择态
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("图库", fontSize = 18.sp, fontWeight = FontWeight.Medium)
-            Spacer(Modifier.weight(1f))
-            TextButton(onClick = onBack) { Text("返回拍摄") }
+            if (selecting) {
+                TextButton(onClick = { exitSelection() }) { Text("取消") }
+                Text(
+                    "已选 ${selected.size} 张",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = { selected = shown.map { it.id }.toSet() }) { Text("全选") }
+            } else {
+                Text("图库", fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onOpenManage) { Text("管理分类", fontSize = 13.sp) }
+                TextButton(onClick = onOpenTrash) { Text("回收站", fontSize = 13.sp) }
+                TextButton(onClick = onBack) { Text("返回拍摄", fontSize = 13.sp) }
+            }
         }
 
-        OutlinedTextField(
-            value = query,
-            onValueChange = { query = it },
-            label = { Text("搜索：文字内容 / 标签 / 分类") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true,
-        )
-        Spacer(Modifier.height(8.dp))
+        if (!selecting) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                label = { Text("搜索：文字内容 / 标签 / 分类") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            Spacer(Modifier.height(8.dp))
 
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            val filters: List<String?> = listOf(null) + allCats.map { it.id }
-            items(filters) { f ->
-                FilterChip(
-                    selected = effFilter == f,
-                    onClick = { filter = f },
-                    label = {
-                        Text(
-                            (if (f == null) "全部" else allCats.first { it.id == f }.label) +
-                                " " + (if (f == null) records.size else counts[f] ?: 0),
-                        )
-                    },
-                )
-            }
-            item {
-                FilterChip(
-                    selected = false,
-                    onClick = { showAddDialog = true },
-                    label = { Text("＋ 新分类") },
-                )
-            }
-            item {
-                FilterChip(
-                    selected = false,
-                    onClick = { showManage = true },
-                    label = { Text("管理") },
-                )
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                val filters: List<String?> = listOf(null) + allCats.map { it.id }
+                items(filters) { f ->
+                    FilterChip(
+                        selected = effFilter == f,
+                        onClick = { filter = f },
+                        label = {
+                            Text(
+                                (if (f == null) "全部" else allCats.first { it.id == f }.label) +
+                                    " " + (if (f == null) records.size else counts[f] ?: 0),
+                            )
+                        },
+                    )
+                }
+                item {
+                    FilterChip(
+                        selected = false,
+                        onClick = { showAddDialog = true },
+                        label = { Text("＋ 新分类") },
+                    )
+                }
             }
         }
 
@@ -443,10 +479,42 @@ fun LibraryScreen(
                         path = store.photoFile(r.id).absolutePath,
                         categoryLabel = (allCats.firstOrNull { it.id == r.categoryId } ?: Categories.UNCATEGORIZED).label,
                         timeLabel = formatTime(r.createdAt, "MM-dd HH:mm"),
-                        onClick = { onOpen(r.id) },
-                        onLongClick = { deleteTarget = r },
+                        selecting = selecting,
+                        selected = r.id in selected,
+                        onClick = {
+                            if (selecting) {
+                                selected = if (r.id in selected) selected - r.id else selected + r.id
+                            } else {
+                                onOpen(r.id)
+                            }
+                        },
+                        onLongClick = {
+                            if (!selecting) {
+                                selecting = true
+                                selected = setOf(r.id)
+                            }
+                        },
                     )
                 }
+            }
+        }
+
+        // 批量操作栏
+        if (selecting) {
+            Row(
+                Modifier.fillMaxWidth().padding(top = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Button(
+                    onClick = { showBatchMove = true },
+                    enabled = selected.isNotEmpty(),
+                    modifier = Modifier.weight(1f),
+                ) { Text("归类") }
+                Button(
+                    onClick = { showBatchDelete = true },
+                    enabled = selected.isNotEmpty(),
+                    modifier = Modifier.weight(1f),
+                ) { Text("删除") }
             }
         }
     }
@@ -458,37 +526,43 @@ fun LibraryScreen(
         )
     }
 
-    deleteTarget?.let { target ->
-        ConfirmDeleteDialog(
-            onConfirm = {
-                store.delete(target.id)
-                deleteTarget = null
+    if (showBatchMove) {
+        CategoryPickerDialog(
+            allCats = allCats,
+            onPick = { c ->
+                selected.forEach { store.move(it, c.id) }
+                showBatchMove = false
                 refreshKey++
+                exitSelection()
             },
-            onDismiss = { deleteTarget = null },
+            onDismiss = { showBatchMove = false },
         )
     }
 
-    if (showManage) {
-        CategoryManageDialog(
-            customLabels = allCats.filter { Categories.isCustom(it.id) }.map { it.label },
-            countOf = { label -> counts[Categories.CUSTOM_PREFIX + label] ?: 0 },
-            onRename = { old, new ->
-                onRenameCategory(old, new)
+    if (showBatchDelete) {
+        ConfirmDeleteDialog(
+            count = selected.size,
+            onConfirm = {
+                selected.forEach { store.trash(it) }
                 refreshKey++
+                exitSelection()
             },
-            onDelete = { label ->
-                onDeleteCategory(label)
-                refreshKey++
-            },
-            onDismiss = { showManage = false },
+            onDismiss = { showBatchDelete = false },
         )
     }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun RecordThumb(path: String, categoryLabel: String, timeLabel: String, onClick: () -> Unit, onLongClick: () -> Unit) {
+fun RecordThumb(
+    path: String,
+    categoryLabel: String,
+    timeLabel: String,
+    selecting: Boolean = false,
+    selected: Boolean = false,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit = {},
+) {
     val bitmap by produceState<Bitmap?>(null, path) {
         value = withContext(Dispatchers.IO) { decodeSampled(path, 256) }
     }
@@ -517,16 +591,35 @@ fun RecordThumb(path: String, categoryLabel: String, timeLabel: String, onClick:
                 .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
                 .padding(horizontal = 4.dp, vertical = 1.dp),
         )
-        Text(
-            timeLabel,
-            fontSize = 10.sp,
-            color = Color.White,
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(4.dp)
-                .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
-                .padding(horizontal = 4.dp, vertical = 1.dp),
-        )
+        if (!selecting) {
+            Text(
+                timeLabel,
+                fontSize = 10.sp,
+                color = Color.White,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(4.dp)
+                    .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 4.dp, vertical = 1.dp),
+            )
+        }
+        // 选择态勾选圈
+        if (selecting) {
+            Box(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(4.dp)
+                    .size(20.dp)
+                    .background(
+                        if (selected) Color(0xFF1E88E5) else Color.Black.copy(alpha = 0.35f),
+                        CircleShape,
+                    )
+                    .border(1.dp, Color.White, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (selected) Text("✓", color = Color.White, fontSize = 12.sp)
+            }
+        }
     }
 }
 
@@ -543,6 +636,7 @@ fun DetailScreen(
     onNavigate: (String) -> Unit,
     onBack: () -> Unit,
 ) {
+    val ctx = LocalContext.current
     var record by remember(recordId) { mutableStateOf(store.get(recordId)) }
     val scope = rememberCoroutineScope()
     var aiLoading by remember { mutableStateOf(false) }
@@ -551,6 +645,18 @@ fun DetailScreen(
     var showSource by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
+    var saveMsg by remember { mutableStateOf<String?>(null) }
+    var pendingSave by remember { mutableStateOf(false) }
+    var awaitingPerm by remember { mutableStateOf(false) }
+
+    val writePermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted && awaitingPerm) {
+            awaitingPerm = false
+            pendingSave = true
+        } else if (!granted) {
+            saveMsg = "未授予存储权限，无法保存到相册"
+        }
+    }
 
     val r = record
     if (r == null) {
@@ -561,23 +667,66 @@ fun DetailScreen(
         return
     }
 
-    // 同一排序（按时间倒序）下的上一张 / 下一张
+    // 同一排序（按时间倒序）下的相邻记录，供 HorizontalPager 翻页
     val siblings = remember(recordId) { store.list() }
-    val idx = siblings.indexOfFirst { it.id == r.id }
-    val prev = siblings.getOrNull(idx - 1)
-    val next = siblings.getOrNull(idx + 1)
+    val pagerState = rememberPagerState(
+        initialPage = siblings.indexOfFirst { it.id == recordId }.coerceAtLeast(0),
+    ) { siblings.size }
 
-    val bitmap by produceState<Bitmap?>(null, r.id) {
-        value = withContext(Dispatchers.IO) { decodeSampled(store.photoFile(r.id).absolutePath, 1080) }
+    // 滑动翻页落定 → 切换当前记录
+    LaunchedEffect(pagerState, siblings) {
+        snapshotFlow { pagerState.settledPage }.collect { page ->
+            siblings.getOrNull(page)?.let { if (it.id != recordId) onNavigate(it.id) }
+        }
+    }
+    // 外部跳转（如删除后导航）→ pager 跟随
+    LaunchedEffect(recordId, siblings) {
+        val target = siblings.indexOfFirst { it.id == recordId }
+        if (target >= 0 && pagerState.currentPage != target) pagerState.scrollToPage(target)
+    }
+    val page = pagerState.currentPage
+
+    fun doSave() {
+        scope.launch {
+            val msg = withContext(Dispatchers.IO) {
+                ImageExporter.saveToGallery(ctx, store.photoFile(r.id))
+            }
+            saveMsg = msg.fold({ "已保存到$it" }, { "保存失败：${it.message}" })
+        }
+    }
+    LaunchedEffect(pendingSave) {
+        if (pendingSave) {
+            pendingSave = false
+            doSave()
+        }
     }
 
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onBack) { Text("← 图库") }
             Spacer(Modifier.weight(1f))
+            TextButton(
+                onClick = {
+                    if (Build.VERSION.SDK_INT >= 29 ||
+                        ContextCompat.checkSelfPermission(ctx, Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+                        PackageManager.PERMISSION_GRANTED
+                    ) {
+                        doSave()
+                    } else {
+                        awaitingPerm = true
+                        writePermLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                    }
+                },
+            ) { Text("保存") }
+            TextButton(onClick = { showDeleteDialog = true }) { Text("删除") }
             Box {
                 TextButton(onClick = { menuOpen = true }) {
-                    Text("分类：${(allCats.firstOrNull { it.id == r.categoryId } ?: Categories.UNCATEGORIZED).label} ▾")
+                    val uncategorized = r.categoryId == Categories.UNCATEGORIZED.id
+                    Text(
+                        "分类：${(allCats.firstOrNull { it.id == r.categoryId } ?: Categories.UNCATEGORIZED).label} ▾",
+                        color = if (uncategorized) MaterialTheme.colorScheme.primary else Color.Unspecified,
+                        fontWeight = if (uncategorized) FontWeight.Medium else null,
+                    )
                 }
                 DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                     allCats.forEach { c ->
@@ -599,7 +748,32 @@ fun DetailScreen(
                     )
                 }
             }
-            TextButton(onClick = { showDeleteDialog = true }) { Text("删除") }
+        }
+
+        // 未分类引导
+        if (r.categoryId == Categories.UNCATEGORIZED.id) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(10.dp))
+                    .clickable { menuOpen = true }
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "这张图片还未分类",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    "去归类 ▾",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            Spacer(Modifier.height(8.dp))
         }
 
         Column(
@@ -614,19 +788,29 @@ fun DetailScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     TextButton(
-                        enabled = prev != null,
-                        onClick = { prev?.let { onNavigate(it.id) } },
+                        enabled = page > 0,
+                        onClick = { scope.launch { pagerState.animateScrollToPage(page - 1) } },
                     ) { Text("← 上一张") }
                     Text(
-                        "${idx + 1} / ${siblings.size}",
+                        "${page + 1} / ${siblings.size}",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                     TextButton(
-                        enabled = next != null,
-                        onClick = { next?.let { onNavigate(it.id) } },
+                        enabled = page < siblings.size - 1,
+                        onClick = { scope.launch { pagerState.animateScrollToPage(page + 1) } },
                     ) { Text("下一张 →") }
                 }
+            }
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.fillMaxWidth(),
+                pageSpacing = 12.dp,
+            ) { pageIdx ->
+                val item = siblings.getOrNull(pageIdx)
+                if (item != null) PageImage(store, item.id)
+            }
+            if (siblings.size > 1) {
                 Text(
                     "左右滑动图片也可切换",
                     fontSize = 11.sp,
@@ -634,30 +818,15 @@ fun DetailScreen(
                     modifier = Modifier.padding(bottom = 4.dp),
                 )
             }
-            bitmap?.let {
-                Image(
-                    bitmap = it.asImageBitmap(),
-                    contentDescription = null,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .pointerInput(r.id, siblings.size) {
-                            var dragX = 0f
-                            detectHorizontalDragGestures(
-                                onDragStart = { dragX = 0f },
-                                onDragEnd = {
-                                    when {
-                                        dragX <= -100f && next != null -> onNavigate(next.id)
-                                        dragX >= 100f && prev != null -> onNavigate(prev.id)
-                                    }
-                                    dragX = 0f
-                                },
-                            ) { _, amount -> dragX += amount }
-                        },
+            saveMsg?.let {
+                Text(
+                    it,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(bottom = 4.dp),
                 )
             }
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(4.dp))
 
             // 拍摄 / 上传时间
             Text(
@@ -765,14 +934,246 @@ fun DetailScreen(
     if (showDeleteDialog) {
         ConfirmDeleteDialog(
             onConfirm = {
-                // 删除前先算好相邻记录：优先跳到下一张，没有则上一张，再没有回图库
+                // 删除（入回收站）前先算好相邻记录：优先跳到下一张，没有则上一张，再没有回图库
                 val i = siblings.indexOfFirst { it.id == r.id }
-                store.delete(r.id)
+                store.trash(r.id)
                 showDeleteDialog = false
                 val nextId = siblings.getOrNull(i + 1)?.id ?: siblings.getOrNull(i - 1)?.id
                 if (nextId != null) onNavigate(nextId) else onBack()
             },
             onDismiss = { showDeleteDialog = false },
+        )
+    }
+}
+
+@Composable
+fun PageImage(store: RecordStore, recordId: String) {
+    val bitmap by produceState<Bitmap?>(null, recordId) {
+        value = withContext(Dispatchers.IO) { decodeSampled(store.photoFile(recordId).absolutePath, 1080) }
+    }
+    Box(
+        Modifier.fillMaxWidth().height(320.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        bitmap?.let {
+            Image(
+                bitmap = it.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } ?: CircularProgressIndicator(Modifier.size(24.dp))
+    }
+}
+
+// ---------------------------------------------------------------- 分类管理页
+
+@Composable
+fun CategoryManageScreen(
+    store: RecordStore,
+    allCats: List<Category>,
+    onAddCategory: (String) -> Unit,
+    onRenameCategory: (String, String) -> Unit,
+    onDeleteCategory: (String) -> Unit,
+    onBack: () -> Unit,
+) {
+    var refreshKey by remember { mutableStateOf(0) }
+    var showAdd by remember { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf<String?>(null) }
+    var deleting by remember { mutableStateOf<String?>(null) }
+
+    val records = remember(refreshKey, allCats) { store.list() }
+    val counts = remember(records) { records.groupingBy { it.categoryId }.eachCount() }
+
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("管理分类", fontSize = 18.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = onBack) { Text("返回") }
+        }
+        Spacer(Modifier.height(8.dp))
+
+        Button(onClick = { showAdd = true }, modifier = Modifier.fillMaxWidth()) { Text("＋ 新建分类") }
+        Spacer(Modifier.height(12.dp))
+
+        LazyColumn(
+            Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            items(allCats, key = { it.id }) { c ->
+                val isCustom = Categories.isCustom(c.id)
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(c.label, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                        Text(
+                            "${counts[c.id] ?: 0} 张图片" + if (!isCustom) " · 内置" else "",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (isCustom) {
+                        TextButton(onClick = { renaming = c.label }) { Text("重命名") }
+                        TextButton(onClick = { deleting = c.label }) { Text("删除") }
+                    }
+                }
+            }
+        }
+        Text(
+            "删除分类后，其中的图片会移入「未分类」。",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+
+    if (showAdd) {
+        NewCategoryDialog(
+            onConfirm = {
+                onAddCategory(it)
+                refreshKey++
+            },
+            onDismiss = { showAdd = false },
+        )
+    }
+    renaming?.let { old ->
+        CategoryNameDialog(
+            title = "重命名分类",
+            initial = old,
+            confirmLabel = "重命名",
+            onConfirm = { new ->
+                onRenameCategory(old, new)
+                refreshKey++
+            },
+            onDismiss = { renaming = null },
+        )
+    }
+    deleting?.let { label ->
+        AlertDialog(
+            onDismissRequest = { deleting = null },
+            title = { Text("删除分类「$label」？") },
+            text = {
+                Text(
+                    "该分类下的 ${counts[Categories.CUSTOM_PREFIX + label] ?: 0} 张图片将移入「未分类」，" +
+                        "图片本体不受影响。",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onDeleteCategory(label)
+                    refreshKey++
+                    deleting = null
+                }) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleting = null }) { Text("取消") }
+            },
+        )
+    }
+}
+
+// ---------------------------------------------------------------- 回收站
+
+@Composable
+fun TrashScreen(store: RecordStore, onBack: () -> Unit) {
+    var refreshKey by remember { mutableStateOf(0) }
+    var actionTarget by remember { mutableStateOf<RecordStore.Record?>(null) }
+    var showEmpty by remember { mutableStateOf(false) }
+
+    val items = remember(refreshKey) { store.listTrashed() }
+
+    Column(Modifier.fillMaxSize().padding(16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("回收站", fontSize = 18.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.weight(1f))
+            if (items.isNotEmpty()) {
+                TextButton(onClick = { showEmpty = true }) { Text("清空回收站") }
+            }
+            TextButton(onClick = onBack) { Text("返回") }
+        }
+
+        if (items.isEmpty()) {
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Text("回收站是空的")
+            }
+        } else {
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(96.dp),
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                gridItems(items, key = { it.id }) { r ->
+                    RecordThumb(
+                        path = store.trashedPhotoFile(r.id).absolutePath,
+                        categoryLabel = "回收站",
+                        timeLabel = formatTime(
+                            if (r.trashedAt > 0) r.trashedAt else r.createdAt,
+                            "MM-dd HH:mm",
+                        ),
+                        onClick = { actionTarget = r },
+                    )
+                }
+            }
+        }
+        Text(
+            "删除的图片先进入回收站，可随时恢复；清空后彻底删除、不可恢复。",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+
+    actionTarget?.let { t ->
+        AlertDialog(
+            onDismissRequest = { actionTarget = null },
+            title = { Text("回收站操作") },
+            text = {
+                Text(
+                    "删除于 " + formatTime(
+                        if (t.trashedAt > 0) t.trashedAt else t.createdAt,
+                        "yyyy-MM-dd HH:mm",
+                    ) + "。恢复后图片回到图库原分类。",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    store.restore(t.id)
+                    refreshKey++
+                    actionTarget = null
+                }) { Text("恢复") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(onClick = {
+                        store.purge(t.id)
+                        refreshKey++
+                        actionTarget = null
+                    }) { Text("彻底删除", color = MaterialTheme.colorScheme.error) }
+                    TextButton(onClick = { actionTarget = null }) { Text("取消") }
+                }
+            },
+        )
+    }
+
+    if (showEmpty) {
+        AlertDialog(
+            onDismissRequest = { showEmpty = false },
+            title = { Text("清空回收站？") },
+            text = { Text("将彻底删除回收站中的 ${items.size} 张图片，不可恢复。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    store.emptyTrash()
+                    showEmpty = false
+                    refreshKey++
+                }) { Text("清空", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showEmpty = false }) { Text("取消") }
+            },
         )
     }
 }
@@ -878,91 +1279,44 @@ fun CategoryNameDialog(
 }
 
 @Composable
-fun CategoryManageDialog(
-    customLabels: List<String>,
-    countOf: (String) -> Int,
-    onRename: (String, String) -> Unit,
-    onDelete: (String) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    var renaming by remember { mutableStateOf<String?>(null) }
-    var deleting by remember { mutableStateOf<String?>(null) }
-
+fun ConfirmDeleteDialog(count: Int = 1, onConfirm: () -> Unit, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("管理分类") },
-        text = {
-            Column {
-                if (customLabels.isEmpty()) {
-                    Text(
-                        "还没有自定义分类，点「＋ 新分类」创建",
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                customLabels.forEach { label ->
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.padding(vertical = 2.dp),
-                    ) {
-                        Text(
-                            "${label}（${countOf(label)} 张）",
-                            fontSize = 14.sp,
-                            modifier = Modifier.weight(1f),
-                        )
-                        TextButton(onClick = { renaming = label }) { Text("重命名") }
-                        TextButton(onClick = { deleting = label }) { Text("删除") }
-                    }
-                }
-                Text(
-                    "删除分类后，其中的图片会移入「未分类」。",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("完成") }
-        },
-    )
-
-    renaming?.let { old ->
-        CategoryNameDialog(
-            title = "重命名分类",
-            initial = old,
-            confirmLabel = "重命名",
-            onConfirm = { new -> onRename(old, new) },
-            onDismiss = { renaming = null },
-        )
-    }
-
-    deleting?.let { label ->
-        AlertDialog(
-            onDismissRequest = { deleting = null },
-            title = { Text("删除分类「$label」？") },
-            text = { Text("该分类下的 ${countOf(label)} 张图片将移入「未分类」，图片本体不受影响。") },
-            confirmButton = {
-                TextButton(onClick = {
-                    onDelete(label)
-                    deleting = null
-                }) { Text("删除") }
-            },
-            dismissButton = {
-                TextButton(onClick = { deleting = null }) { Text("取消") }
-            },
-        )
-    }
-}
-
-@Composable
-fun ConfirmDeleteDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("删除这张图片？") },
-        text = { Text("将从图库中永久删除（含原图、识别文字与标签），不可恢复。") },
+        title = { Text(if (count > 1) "删除这 $count 张图片？" else "删除这张图片？") },
+        text = { Text("将移入回收站，可在「回收站」中恢复或彻底删除。") },
         confirmButton = {
             TextButton(onClick = onConfirm) { Text("删除") }
         },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
+}
+
+@Composable
+fun CategoryPickerDialog(
+    allCats: List<Category>,
+    onPick: (Category) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("移动到分类") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                allCats.forEach { c ->
+                    Text(
+                        c.label,
+                        fontSize = 15.sp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onPick(c) }
+                            .padding(vertical = 10.dp),
+                    )
+                }
+            }
+        },
+        confirmButton = {},
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("取消") }
         },

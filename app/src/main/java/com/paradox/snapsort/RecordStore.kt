@@ -12,12 +12,14 @@ import java.util.Locale
  * 零依赖本地存储：每条记录 = 一个文件夹（photo.jpg + meta.json）。
  * 不引入 Room/SQLite —— 个人级数据量下，扫描目录足够快，换来的是体积与复杂度双降。
  *
- * filesDir/records/<id>/photo.jpg
- * filesDir/records/<id>/meta.json  { id, category, created_at, labels, ocr_text, note }
+ * filesDir/records/<id>/photo.jpg   正式记录
+ * filesDir/records/<id>/meta.json   { id, category, created_at, labels, ocr_text, note }
+ * filesDir/trash/<id>/...           回收站（删除先入站，可恢复 / 彻底清除）
  */
 class RecordStore(context: Context) {
 
     private val root = File(context.filesDir, "records").apply { mkdirs() }
+    private val trashDir = File(context.filesDir, "trash").apply { mkdirs() }
 
     data class Record(
         val id: String,
@@ -26,6 +28,7 @@ class RecordStore(context: Context) {
         val labels: List<String>,
         val ocrText: String,
         val note: String?,
+        val trashedAt: Long = 0,
     )
 
     fun save(
@@ -74,10 +77,53 @@ class RecordStore(context: Context) {
 
     fun saveNote(id: String, note: String) = mutate(id) { it.put("note", note) }
 
-    /** 彻底删除一条记录（photo.jpg + meta.json 所在目录整体移除） */
-    fun delete(id: String) {
-        File(root, id).deleteRecursively()
+    // ---------------- 回收站 ----------------
+
+    /** 删除 → 先移入回收站（可恢复） */
+    fun trash(id: String) {
+        val dir = File(root, id)
+        if (!dir.exists()) return
+        runCatching {
+            val mf = File(dir, "meta.json")
+            val m = JSONObject(mf.readText())
+            m.put("trashed_at", System.currentTimeMillis())
+            mf.writeText(m.toString())
+        }
+        val dest = File(trashDir, id)
+        if (dest.exists()) dest.deleteRecursively()
+        dir.renameTo(dest)
     }
+
+    fun listTrashed(): List<Record> =
+        trashDir.listFiles { f -> f.isDirectory && File(f, "meta.json").exists() }
+            ?.mapNotNull { dir -> runCatching { parse(File(dir, "meta.json")) }.getOrNull() }
+            ?.sortedByDescending { it.trashedAt }
+            ?: emptyList()
+
+    fun trashedPhotoFile(id: String): File = File(trashDir, "$id/photo.jpg")
+
+    fun restore(id: String) {
+        val dir = File(trashDir, id)
+        if (!dir.exists()) return
+        runCatching {
+            val mf = File(dir, "meta.json")
+            val m = JSONObject(mf.readText())
+            m.remove("trashed_at")
+            mf.writeText(m.toString())
+        }
+        dir.renameTo(File(root, id))
+    }
+
+    /** 彻底删除（不可恢复） */
+    fun purge(id: String) {
+        File(trashDir, id).deleteRecursively()
+    }
+
+    fun emptyTrash() {
+        trashDir.listFiles()?.forEach { it.deleteRecursively() }
+    }
+
+    // ---------------- 内部 ----------------
 
     private fun mutate(id: String, edit: (JSONObject) -> JSONObject) {
         val metaFile = File(root, "$id/meta.json")
@@ -96,6 +142,7 @@ class RecordStore(context: Context) {
             labels = labels,
             ocrText = m.optString("ocr_text"),
             note = m.optString("note").ifBlank { null },
+            trashedAt = m.optLong("trashed_at"),
         )
     }
 }
