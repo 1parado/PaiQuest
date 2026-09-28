@@ -80,7 +80,12 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -101,6 +106,14 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent { SnapSortApp() }
     }
+}
+
+/** 图库时间范围筛选 */
+enum class TimeRange(val label: String, val days: Long?) {
+    ALL("全部时间", null),
+    TODAY("今天", 1),
+    WEEK("近7天", 7),
+    MONTH("近30天", 30),
 }
 
 sealed interface Screen {
@@ -383,6 +396,7 @@ fun LibraryScreen(
 ) {
     var filter by remember { mutableStateOf<String?>(null) }
     var query by remember { mutableStateOf("") }
+    var timeRange by remember { mutableStateOf(TimeRange.ALL) }
     var showAddDialog by remember { mutableStateOf(false) }
     var refreshKey by remember { mutableStateOf(0) }
 
@@ -395,11 +409,17 @@ fun LibraryScreen(
     // 被删掉的分类 id 自愈为「全部」，避免筛选悬空
     val effFilter = if (filter != null && allCats.any { it.id == filter }) filter else null
     val records = remember(effFilter, refreshKey, allCats) { store.list(effFilter) }
-    val counts = remember(records) { records.groupingBy { it.categoryId }.eachCount() }
+
+    // 时间范围筛选（在分类筛选之后、搜索之前应用，计数跟随时间范围）
+    val timeFiltered = remember(records, timeRange) {
+        val minAt = timeRange.days?.let { System.currentTimeMillis() - it * 86_400_000L }
+        if (minAt == null) records else records.filter { it.createdAt >= minAt }
+    }
+    val counts = remember(timeFiltered) { timeFiltered.groupingBy { it.categoryId }.eachCount() }
 
     // 搜索：匹配 OCR 文字 / 识别标签 / 笔记 / 分类名
     val q = query.trim()
-    val shown = if (q.isEmpty()) records else records.filter { r ->
+    val shown = if (q.isEmpty()) timeFiltered else timeFiltered.filter { r ->
         r.ocrText.contains(q, ignoreCase = true) ||
             r.labels.any { it.contains(q, ignoreCase = true) } ||
             (r.note?.contains(q, ignoreCase = true) == true) ||
@@ -464,6 +484,20 @@ fun LibraryScreen(
                     )
                 }
             }
+
+            // 时间范围筛选
+            LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.padding(top = 6.dp),
+            ) {
+                items(TimeRange.entries) { tr ->
+                    FilterChip(
+                        selected = timeRange == tr,
+                        onClick = { timeRange = tr },
+                        label = { Text(tr.label, fontSize = 13.sp) },
+                    )
+                }
+            }
         }
 
         if (shown.isEmpty()) {
@@ -483,6 +517,8 @@ fun LibraryScreen(
                         path = store.photoFile(r.id).absolutePath,
                         categoryLabel = (allCats.firstOrNull { it.id == r.categoryId } ?: Categories.UNCATEGORIZED).label,
                         timeLabel = formatTime(r.createdAt, "MM-dd HH:mm"),
+                        // 搜索态：缩略图上展示命中文本片段（关键词高亮）
+                        snippet = if (q.isEmpty()) null else snippetFor(r, q),
                         selecting = selecting,
                         selected = r.id in selected,
                         onClick = {
@@ -562,6 +598,7 @@ fun RecordThumb(
     path: String,
     categoryLabel: String,
     timeLabel: String,
+    snippet: AnnotatedString? = null,
     selecting: Boolean = false,
     selected: Boolean = false,
     onClick: () -> Unit,
@@ -583,6 +620,22 @@ fun RecordThumb(
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),
+            )
+        }
+        // 搜索命中文本片段（关键词高亮）
+        if (snippet != null && !selecting) {
+            Text(
+                snippet,
+                fontSize = 10.sp,
+                color = Color.White,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(4.dp)
+                    .fillMaxWidth()
+                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 4.dp, vertical = 2.dp),
             )
         }
         Text(
@@ -1474,6 +1527,46 @@ fun CategoryPickerDialog(
             TextButton(onClick = onDismiss) { Text("取消") }
         },
     )
+}
+
+/** 取第一条命中关键词的文本（标签优先，OCR 截取命中处前后 12 字），交给 highlight 渲染 */
+private fun snippetFor(r: RecordStore.Record, q: String): AnnotatedString? {
+    if (q.isEmpty()) return null
+    val hit: String? = when {
+        r.labels.any { it.contains(q, ignoreCase = true) } ->
+            r.labels.first { it.contains(q, ignoreCase = true) }
+        r.ocrText.contains(q, ignoreCase = true) -> {
+            val idx = r.ocrText.indexOf(q, ignoreCase = true)
+            val start = maxOf(0, idx - 12)
+            val end = minOf(r.ocrText.length, idx + q.length + 12)
+            (if (start > 0) "…" else "") +
+                r.ocrText.substring(start, end) +
+                (if (end < r.ocrText.length) "…" else "")
+        }
+        r.note?.contains(q, ignoreCase = true) == true -> r.note!!
+        else -> null
+    }
+    return hit?.let { highlight(it, q) }
+}
+
+/** 关键词高亮：命中部分加粗 + 主题蓝底色 */
+private fun highlight(text: String, q: String): AnnotatedString {
+    if (q.isEmpty()) return AnnotatedString(text)
+    val regex = Regex(Regex.escape(q), RegexOption.IGNORE_CASE)
+    return buildAnnotatedString {
+        var last = 0
+        for (m in regex.findAll(text)) {
+            append(text.substring(last, m.range.first))
+            withStyle(
+                SpanStyle(
+                    fontWeight = FontWeight.Bold,
+                    background = Color(0xFF1E88E5).copy(alpha = 0.28f),
+                ),
+            ) { append(m.value) }
+            last = m.range.last + 1
+        }
+        append(text.substring(last))
+    }
 }
 
 private fun formatTime(ms: Long, pattern: String): String =
