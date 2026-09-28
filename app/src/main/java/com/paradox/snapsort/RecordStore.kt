@@ -77,6 +77,9 @@ class RecordStore(context: Context) {
 
     fun saveNote(id: String, note: String) = mutate(id) { it.put("note", note) }
 
+    /** 手动编辑标签（整体覆盖：添加与删除都走这里） */
+    fun saveLabels(id: String, labels: List<String>) = mutate(id) { it.put("labels", JSONArray(labels)) }
+
     // ---------------- 回收站 ----------------
 
     /** 删除 → 先移入回收站（可恢复） */

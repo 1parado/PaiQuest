@@ -25,12 +25,14 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -44,6 +46,7 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -83,6 +86,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.paradox.snapsort.net.LlmClient
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -645,6 +649,7 @@ fun DetailScreen(
     var showSource by remember { mutableStateOf(false) }
     var showAddDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
+    var showTagDialog by remember { mutableStateOf(false) }
     var saveMsg by remember { mutableStateOf<String?>(null) }
     var pendingSave by remember { mutableStateOf(false) }
     var awaitingPerm by remember { mutableStateOf(false) }
@@ -684,7 +689,6 @@ fun DetailScreen(
         val target = siblings.indexOfFirst { it.id == recordId }
         if (target >= 0 && pagerState.currentPage != target) pagerState.scrollToPage(target)
     }
-    val page = pagerState.currentPage
 
     fun doSave() {
         scope.launch {
@@ -701,7 +705,10 @@ fun DetailScreen(
         }
     }
 
-    Column(Modifier.fillMaxSize().padding(16.dp)) {
+    BoxWithConstraints(Modifier.fillMaxSize()) {
+        // 平板 / 横屏（宽 ≥600dp）用左图右文两栏；手机竖屏保持单栏
+        val isWide = maxWidth >= 600.dp
+        Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onBack) { Text("← 图库") }
             Spacer(Modifier.weight(1f))
@@ -776,151 +783,93 @@ fun DetailScreen(
             Spacer(Modifier.height(8.dp))
         }
 
-        Column(
-            Modifier
-                .weight(1f)
-                .verticalScroll(rememberScrollState()),
-        ) {
-            if (siblings.size > 1) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    TextButton(
-                        enabled = page > 0,
-                        onClick = { scope.launch { pagerState.animateScrollToPage(page - 1) } },
-                    ) { Text("← 上一张") }
-                    Text(
-                        "${page + 1} / ${siblings.size}",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    TextButton(
-                        enabled = page < siblings.size - 1,
-                        onClick = { scope.launch { pagerState.animateScrollToPage(page + 1) } },
-                    ) { Text("下一张 →") }
-                }
-            }
-            HorizontalPager(
-                state = pagerState,
-                modifier = Modifier.fillMaxWidth(),
-                pageSpacing = 12.dp,
-            ) { pageIdx ->
-                val item = siblings.getOrNull(pageIdx)
-                if (item != null) PageImage(store, item.id)
-            }
-            if (siblings.size > 1) {
-                Text(
-                    "左右滑动图片也可切换",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(bottom = 4.dp),
-                )
-            }
-            saveMsg?.let {
-                Text(
-                    it,
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(bottom = 4.dp),
-                )
-            }
-            Spacer(Modifier.height(4.dp))
+        // 标签删除（手动编辑）
+        fun removeTag(label: String) {
+            val cur = r.labels - label
+            store.saveLabels(r.id, cur)
+            record = r.copy(labels = cur)
+        }
 
-            // 拍摄 / 上传时间
-            Text(
-                "拍摄/上传时间：" + formatTime(r.createdAt, "yyyy-MM-dd HH:mm"),
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(12.dp))
-
-            if (r.labels.isNotEmpty()) {
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    r.labels.take(6).forEach { label ->
-                        Text(
-                            label,
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier
-                                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(6.dp))
-                                .padding(horizontal = 8.dp, vertical = 3.dp),
+        fun runAi() {
+            scope.launch {
+                aiLoading = true
+                aiError = null
+                try {
+                    val category = allCats.firstOrNull { it.id == r.categoryId } ?: Categories.UNCATEGORIZED
+                    val user =
+                        "图像识别标签：${if (r.labels.isEmpty()) "无" else r.labels.joinToString("、")}\n" +
+                            "图中识别文字：${r.ocrText.ifBlank { "无" }}"
+                    val reply = withContext(Dispatchers.IO) {
+                        LlmClient.chat(
+                            settings.baseUrl,
+                            settings.apiKey,
+                            settings.model,
+                            category.aiPrompt,
+                            listOf("user" to user),
                         )
                     }
+                    store.saveNote(r.id, reply)
+                    record = r.copy(note = reply)
+                } catch (e: Exception) {
+                    aiError = e.message ?: "请求失败"
                 }
-                Spacer(Modifier.height(12.dp))
+                aiLoading = false
             }
+        }
 
-            if (r.ocrText.isNotBlank()) {
-                Text(
-                    if (showSource) "收起识别文字 ▲" else "识别文字 ▼",
-                    fontSize = 13.sp,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.clickable { showSource = !showSource },
-                )
-                if (showSource) {
-                    Text(
-                        r.ocrText,
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier
-                            .padding(top = 6.dp)
-                            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
-                            .padding(12.dp),
+        if (isWide) {
+            // 平板 / 横屏：左图右文两栏
+            Row(Modifier.weight(1f)) {
+                Column(Modifier.weight(0.55f).fillMaxHeight()) {
+                    DetailMediaSection(
+                        store, siblings, pagerState, saveMsg,
+                        pagerModifier = Modifier.weight(1f).fillMaxWidth(),
+                        fillImageHeight = true,
                     )
                 }
-                Spacer(Modifier.height(12.dp))
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Button(
-                    onClick = {
-                        scope.launch {
-                            aiLoading = true
-                            aiError = null
-                            try {
-                                val category = allCats.firstOrNull { it.id == r.categoryId } ?: Categories.UNCATEGORIZED
-                                val user =
-                                    "图像识别标签：${if (r.labels.isEmpty()) "无" else r.labels.joinToString("、")}\n" +
-                                        "图中识别文字：${r.ocrText.ifBlank { "无" }}"
-                                val reply = withContext(Dispatchers.IO) {
-                                    LlmClient.chat(
-                                        settings.baseUrl,
-                                        settings.apiKey,
-                                        settings.model,
-                                        category.aiPrompt,
-                                        listOf("user" to user),
-                                    )
-                                }
-                                store.saveNote(r.id, reply)
-                                record = r.copy(note = reply)
-                            } catch (e: Exception) {
-                                aiError = e.message ?: "请求失败"
-                            }
-                            aiLoading = false
-                        }
-                    },
-                    enabled = !aiLoading,
-                ) { Text(if (r.note == null) "AI 讲解" else "重新讲解") }
-                if (aiLoading) {
-                    Spacer(Modifier.width(8.dp))
-                    CircularProgressIndicator(Modifier.size(16.dp))
+                Column(
+                    Modifier
+                        .weight(0.45f)
+                        .fillMaxHeight()
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    DetailInfoSection(
+                        r,
+                        aiLoading = aiLoading,
+                        aiError = aiError,
+                        showSource = showSource,
+                        onToggleSource = { showSource = !showSource },
+                        onAddTags = { showTagDialog = true },
+                        onRemoveTag = { removeTag(it) },
+                        onRunAi = { runAi() },
+                    )
+                    Spacer(Modifier.height(24.dp))
                 }
             }
-            aiError?.let {
-                Text(
-                    "出错：$it",
-                    color = MaterialTheme.colorScheme.error,
-                    fontSize = 13.sp,
-                    modifier = Modifier.padding(top = 8.dp),
+        } else {
+            Column(
+                Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                DetailMediaSection(
+                    store, siblings, pagerState, saveMsg,
+                    pagerModifier = Modifier.fillMaxWidth(),
+                    fillImageHeight = false,
                 )
+                DetailInfoSection(
+                    r,
+                    aiLoading = aiLoading,
+                    aiError = aiError,
+                    showSource = showSource,
+                    onToggleSource = { showSource = !showSource },
+                    onAddTags = { showTagDialog = true },
+                    onRemoveTag = { removeTag(it) },
+                    onRunAi = { runAi() },
+                )
+                Spacer(Modifier.height(24.dp))
             }
-            r.note?.let {
-                Spacer(Modifier.height(12.dp))
-                Text(it, fontSize = 15.sp, lineHeight = 24.sp)
-            }
-            Spacer(Modifier.height(24.dp))
+        }
         }
     }
 
@@ -944,15 +893,28 @@ fun DetailScreen(
             onDismiss = { showDeleteDialog = false },
         )
     }
+
+    if (showTagDialog) {
+        TagInputDialog(
+            onConfirm = { tags ->
+                val merged = (r.labels + tags).distinct()
+                store.saveLabels(r.id, merged)
+                record = r.copy(labels = merged)
+            },
+            onDismiss = { showTagDialog = false },
+        )
+    }
 }
 
 @Composable
-fun PageImage(store: RecordStore, recordId: String) {
+fun PageImage(store: RecordStore, recordId: String, fillHeight: Boolean = false) {
     val bitmap by produceState<Bitmap?>(null, recordId) {
         value = withContext(Dispatchers.IO) { decodeSampled(store.photoFile(recordId).absolutePath, 1080) }
     }
     Box(
-        Modifier.fillMaxWidth().height(320.dp),
+        Modifier
+            .fillMaxWidth()
+            .then(if (fillHeight) Modifier.fillMaxHeight() else Modifier.height(320.dp)),
         contentAlignment = Alignment.Center,
     ) {
         bitmap?.let {
@@ -964,6 +926,197 @@ fun PageImage(store: RecordStore, recordId: String) {
             )
         } ?: CircularProgressIndicator(Modifier.size(24.dp))
     }
+}
+
+// ---------------------------------------------------------------- 详情页子区（媒体 / 信息 / 标签）
+
+/** 翻页导航 + 图片 Pager + 保存反馈；宽屏 pagerModifier 用 weight 撑满剩余高度 */
+@Composable
+fun DetailMediaSection(
+    store: RecordStore,
+    siblings: List<RecordStore.Record>,
+    pagerState: PagerState,
+    saveMsg: String?,
+    pagerModifier: Modifier,
+    fillImageHeight: Boolean,
+) {
+    val scope = rememberCoroutineScope()
+    val page = pagerState.currentPage
+    if (siblings.size > 1) {
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(
+                enabled = page > 0,
+                onClick = { scope.launch { pagerState.animateScrollToPage(page - 1) } },
+            ) { Text("← 上一张") }
+            Text(
+                "${page + 1} / ${siblings.size}",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            TextButton(
+                enabled = page < siblings.size - 1,
+                onClick = { scope.launch { pagerState.animateScrollToPage(page + 1) } },
+            ) { Text("下一张 →") }
+        }
+    }
+    HorizontalPager(
+        state = pagerState,
+        modifier = pagerModifier,
+        pageSpacing = 12.dp,
+    ) { pageIdx ->
+        val item = siblings.getOrNull(pageIdx)
+        if (item != null) PageImage(store, item.id, fillHeight = fillImageHeight)
+    }
+    if (siblings.size > 1) {
+        Text(
+            "左右滑动图片也可切换",
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(bottom = 4.dp),
+        )
+    }
+    saveMsg?.let {
+        Text(
+            it,
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(bottom = 4.dp),
+        )
+    }
+    Spacer(Modifier.height(4.dp))
+}
+
+/** 时间 + 可编辑标签 + 识别文字 + AI 讲解；纯展示与回调，状态由 DetailScreen 托管 */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun DetailInfoSection(
+    r: RecordStore.Record,
+    aiLoading: Boolean,
+    aiError: String?,
+    showSource: Boolean,
+    onToggleSource: () -> Unit,
+    onAddTags: () -> Unit,
+    onRemoveTag: (String) -> Unit,
+    onRunAi: () -> Unit,
+) {
+    // 拍摄 / 上传时间
+    Text(
+        "拍摄/上传时间：" + formatTime(r.createdAt, "yyyy-MM-dd HH:mm"),
+        fontSize = 12.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Spacer(Modifier.height(12.dp))
+
+    // 标签：端侧识别 + 手动编辑（点 × 删除，点 ＋ 添加）
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        r.labels.forEach { label ->
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(6.dp))
+                    .padding(start = 8.dp, end = 2.dp, top = 3.dp, bottom = 3.dp),
+            ) {
+                Text(label, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                Text(
+                    " ×",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.clickable { onRemoveTag(label) },
+                )
+            }
+        }
+        FilterChip(selected = false, onClick = onAddTags, label = { Text("＋ 加标签") })
+    }
+    if (r.labels.isEmpty()) {
+        Text(
+            "还没有标签：点「＋ 加标签」补充关键词（多个用逗号分隔），搜索时可命中",
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+    Spacer(Modifier.height(12.dp))
+
+    if (r.ocrText.isNotBlank()) {
+        Text(
+            if (showSource) "收起识别文字 ▲" else "识别文字 ▼",
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.clickable { onToggleSource() },
+        )
+        if (showSource) {
+            Text(
+                r.ocrText,
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .padding(top = 6.dp)
+                    .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
+                    .padding(12.dp),
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+    }
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Button(onClick = onRunAi, enabled = !aiLoading) {
+            Text(if (r.note == null) "AI 讲解" else "重新讲解")
+        }
+        if (aiLoading) {
+            Spacer(Modifier.width(8.dp))
+            CircularProgressIndicator(Modifier.size(16.dp))
+        }
+    }
+    aiError?.let {
+        Text(
+            "出错：$it",
+            color = MaterialTheme.colorScheme.error,
+            fontSize = 13.sp,
+            modifier = Modifier.padding(top = 8.dp),
+        )
+    }
+    r.note?.let {
+        Spacer(Modifier.height(12.dp))
+        Text(it, fontSize = 15.sp, lineHeight = 24.sp)
+    }
+}
+
+/** 添加标签对话框：支持逗号 / 顿号 / 空格 / 分号分隔多个标签 */
+@Composable
+fun TagInputDialog(onConfirm: (List<String>) -> Unit, onDismiss: () -> Unit) {
+    var text by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("添加标签") },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                label = { Text("标签（多个用逗号分隔）") },
+                singleLine = true,
+            )
+        },
+        confirmButton = {
+            TextButton(
+                enabled = text.isNotBlank(),
+                onClick = {
+                    onConfirm(
+                        text.split(',', '，', '、', ' ', ';', '；')
+                            .map { it.trim() }
+                            .filter { it.isNotBlank() }
+                            .distinct(),
+                    )
+                    onDismiss()
+                },
+            ) { Text("添加") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
 }
 
 // ---------------------------------------------------------------- 分类管理页
